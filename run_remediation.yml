@@ -1,0 +1,75 @@
+---
+# Wrapper JT playbook: run another playbook from this project via extra_vars.
+#
+# Required (one of):
+#   target_playbook: playbook_remediation_CVE-2026-31431.yml
+# Optional aliases (same meaning):
+#   playbook_name | playbook_file | jt_playbook
+#
+# Path is relative to the project root (same SCM tree as this file).
+# Example AO node:
+#   job_template_name: "51. Run Repo Playbook"
+#   extra_vars:
+#     target_playbook: "playbook_remediation_${trigger.event.payload.reported_cve}.yml"
+#     # limit / other vars are passed through to the included playbook
+
+- name: Resolve and validate target playbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Prefer target_playbook; fall back to AO/create-JT aliases
+    _target_playbook: >-
+      {{
+        target_playbook
+        | default(playbook_name | default(playbook_file | default(jt_playbook | default('')), true), true)
+      }}
+  tasks:
+    - name: Require playbook path extra_var
+      ansible.builtin.assert:
+        that:
+          - _target_playbook | length > 0
+        fail_msg: >-
+          Pass target_playbook (or playbook_name / playbook_file / jt_playbook)
+          as an extra_var with a path relative to the project root.
+
+    - name: Reject path traversal outside the project
+      ansible.builtin.assert:
+        that:
+          - "'..' not in (_target_playbook | split('/'))"
+          - not (_target_playbook | regex_search('^/'))
+        fail_msg: >-
+          target_playbook must be a relative path inside the project
+          (got: {{ _target_playbook }}).
+
+    - name: Check playbook exists in project
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/{{ _target_playbook }}"
+      register: _target_playbook_stat
+
+    - name: Fail if playbook file is missing
+      ansible.builtin.assert:
+        that:
+          - _target_playbook_stat.stat.exists | default(false)
+          - _target_playbook_stat.stat.isreg | default(false)
+        fail_msg: >-
+          Playbook not found in project: {{ _target_playbook }}
+          (looked up {{ playbook_dir }}/{{ _target_playbook }}).
+
+    - name: Show playbook that will run
+      ansible.builtin.debug:
+        msg: "Including playbook {{ _target_playbook }}"
+
+    - name: Publish resolved playbook artifact
+      ansible.builtin.set_stats:
+        data:
+          target_playbook: "{{ _target_playbook }}"
+
+# import_playbook is static: the path must come from extra_vars / -e
+# (available at parse time). Keep the same alias chain as above.
+- name: Run requested repo playbook
+  ansible.builtin.import_playbook: >-
+    {{
+      target_playbook
+      | default(playbook_name | default(playbook_file | default(jt_playbook)))
+    }}
